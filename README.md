@@ -7,8 +7,8 @@ Keep a Fuchsia checkout updated and built on a schedule, so the first build
 of your day is warm, without ever running an update over your uncommitted
 work.
 
-**Status:** early. `fx-updater run` works; scheduling (`install`) and
-`status` are not written yet.
+**Status:** early. `run`, `install`, `uninstall` and `status` work on Linux
+with systemd. The newcomer quickstart is still to be written.
 
 **Terms**
 
@@ -29,6 +29,20 @@ fx-updater run
 That runs `jiri update` and then `fx build` for the default build dir. Use
 `--build-dir NAME` (repeatable) to pick others, and `--no-update` to build
 only.
+
+## Schedule it
+
+```bash
+fx-updater install --fuchsia-dir /path/to/fuchsia --build-dir core.x64
+fx-updater status
+```
+
+`install` writes `~/.config/fx-updater/config.toml` and a systemd user timer
+(`fx-updater.timer`, daily at 05:30; change it with `--schedule`, in systemd
+`OnCalendar` syntax). Add `--dry-run` to see what it would do first. For the
+timer to fire while you are logged out, enable linger once:
+`loginctl enable-linger $USER`. `fx-updater uninstall` removes the timer and
+keeps the config.
 
 ## What it will not do
 
@@ -51,7 +65,13 @@ any project with uncommitted changes. Only the permission bit is rewritten.
 `status.json` holds the last outcome, `logs/` one log per run, and `lock`
 exists while a run is in progress.
 
-`fx-updater --skill` prints the agent-facing usage document.
+`fx-updater status` prints the last outcome in one line (`--json` for the whole
+document). `--prom-dir DIR` (or `prom_dir` in the config, which `install
+--prom-dir` sets) also writes `fx_updater.prom` there for a Prometheus textfile
+collector; with neither, nothing is written.
+
+`fx-updater --skill` prints the agent-facing usage document, including the
+exit codes. `fx-updater --help` lists them too.
 
 ## License
 

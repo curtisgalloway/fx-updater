@@ -42,6 +42,8 @@ exit "$(cat .fake/build_rc 2>/dev/null || echo 0)"
 @pytest.fixture(name="tree")
 def fixture_tree(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Never read the host's real config: it would redirect runs at a real tree.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     root = tmp_path / "fuchsia"
     (root / ".jiri_root/bin").mkdir(parents=True)
     (root / "scripts").mkdir()
@@ -97,16 +99,17 @@ def test_work_in_progress_skips_with_exit_zero(tree):
     assert "src/mine.cc" in doc["wip"]
 
 
-def test_failed_jiri_status_is_treated_as_wip(tree):
+def test_failed_jiri_status_is_its_own_outcome(tree):
+    """Not skipped_wip: the WIP check never ran, and that must be visible."""
     _fake(tree, "status_rc", "1")
-    assert _run(tree) == cli.EXIT_STATUS_FAILED
-    assert _status()["outcome"] == "skipped_wip"
+    assert _run(tree) == cli.EXIT_BUSY
+    assert _status()["outcome"] == "status_failed"
     assert "jiri update" not in _calls(tree)
 
 
 def test_disk_floor_touches_nothing(tree):
     rc = cli.main(["run", "--fuchsia-dir", str(tree), "--min-free-gb", "1e12"])
-    assert rc == cli.EXIT_DISK
+    assert rc == cli.EXIT_SETUP
     assert _calls(tree) == []
     assert _status()["outcome"] == "skipped_disk"
 
@@ -115,7 +118,7 @@ def test_held_lock_refuses_and_leaves_it(tree):
     lock = status.lock_path()
     lock.parent.mkdir(parents=True)
     lock.write_text("12345")
-    assert _run(tree) == cli.EXIT_LOCKED
+    assert _run(tree) == cli.EXIT_BUSY
     assert _calls(tree) == []
     assert lock.exists()
     assert not status.default_status_path().exists()
@@ -132,10 +135,11 @@ def test_transient_update_failure_is_retried(tree):
 def test_hard_update_failure_is_not_retried(tree):
     _fake(tree, "update_rcs", "1\n0\n")
     _fake(tree, "update_msg", "CONFLICT (content): Merge conflict in a.cc\n")
-    assert _run(tree, "--retry-wait-secs", "0") == 1
+    assert _run(tree, "--retry-wait-secs", "0") == cli.EXIT_PARTIAL
     assert _calls(tree).count("jiri update") == 1
     doc = _status()
     assert doc["outcome"] == "update_failed"
+    assert doc["update_rc"] == 1
     assert "(hard)" in doc["reason"]
 
 
@@ -152,7 +156,7 @@ def test_hard_failure_after_transient_one_is_not_retried(tree):
             " echo 'CONFLICT (content): in a.cc' > .fake/update_msg",
         )
     )
-    assert _run(tree, "--retry-wait-secs", "0") == 1
+    assert _run(tree, "--retry-wait-secs", "0") == cli.EXIT_PARTIAL
     assert _calls(tree).count("jiri update") == 2
     assert "(hard) after 2 attempt(s)" in _status()["reason"]
 
@@ -175,7 +179,8 @@ def test_earlier_dirs_stale_graph_does_not_regen_a_later_dir(tree):
         "esac\n"
         "exit 0\n"
     )
-    assert _run(tree, "--no-update", "--build-dir", "a", "--build-dir", "b") == 1
+    rc = _run(tree, "--no-update", "--build-dir", "a", "--build-dir", "b")
+    assert rc == cli.EXIT_BUILD_FAILED
     assert _calls(tree) == [
         "fx --dir out/a build",
         "fx --dir out/a gen",
@@ -194,11 +199,13 @@ def test_negative_retries_is_a_usage_error(tree):
     assert _calls(tree) == []
 
 
-def test_build_failure_exits_with_fx_code(tree):
+def test_build_failure_exits_100_and_records_fx_code(tree):
+    """fx's own code goes in the document, never out as the exit status."""
     _fake(tree, "build_rc", "7")
-    assert _run(tree, "--build-dir", "a", "--build-dir", "b") == 7
+    assert _run(tree, "--build-dir", "a", "--build-dir", "b") == 100
     doc = _status()
     assert doc["outcome"] == "build_failed"
+    assert [b["build_exit"] for b in doc["builds"]] == [7, 7]
     # Every requested dir is still attempted.
     assert [b["build_dir"] for b in doc["builds"]] == ["a", "b"]
 
@@ -211,6 +218,7 @@ def test_no_update_never_checks_or_updates(tree):
 
 def test_missing_tools_exit_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     assert cli.main(["run", "--fuchsia-dir", str(tmp_path)]) == cli.EXIT_SETUP
     assert not status.lock_path().exists()
 
