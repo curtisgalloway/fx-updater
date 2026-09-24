@@ -11,6 +11,7 @@ A flag given on the command line always wins over the file.
     schedule = "*-*-* 05:30:00"     # systemd OnCalendar syntax
     min_free_gb = 100.0
     prom_dir = ""                   # optional; "" writes no .prom file
+    post_build_hook = ""            # optional; a command, split like a shell would
 
 `install` regenerates the file from its values, so comments added by hand
 do not survive the next install.
@@ -26,6 +27,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import shlex
 import tempfile
 import tomllib
 
@@ -46,6 +48,8 @@ class Config:
     schedule: str = DEFAULT_SCHEDULE
     min_free_gb: float = DEFAULT_MIN_FREE_GB
     prom_dir: pathlib.Path | None = None
+    # Run after every outcome, under the lock; see docs/contract.md.
+    post_build_hook: str = ""
 
 
 def default_path() -> pathlib.Path:
@@ -67,8 +71,15 @@ def has_control_char(text: str) -> bool:
 def check_build_dir(name: str) -> None:
     """Raise ConfigError unless `name` is a plain dir name under out/."""
     # A build dir is a name under out/, never a path; "../x" or "a/b"
-    # would point fx at something other than what the user meant.
-    if not name or "/" in name or name in (".", "..") or has_control_char(name):
+    # would point fx at something other than what the user meant. No
+    # whitespace either: the hook gets the names space-separated.
+    if (
+        not name
+        or "/" in name
+        or name in (".", "..")
+        or has_control_char(name)
+        or any(c.isspace() for c in name)
+    ):
         raise ConfigError(f"build dir {name!r} is not a dir name")
 
 
@@ -84,9 +95,14 @@ def validate(cfg: Config) -> Config:
         ("fuchsia_dir", str(cfg.fuchsia_dir)),
         ("schedule", cfg.schedule),
         ("prom_dir", str(cfg.prom_dir or "")),
+        ("post_build_hook", cfg.post_build_hook),
     ):
         if has_control_char(value):
             raise ConfigError(f"{key} must not contain control characters")
+    try:
+        shlex.split(cfg.post_build_hook)
+    except ValueError as e:
+        raise ConfigError(f"post_build_hook: {e}") from e
     if cfg.min_free_gb < 0:
         raise ConfigError(f"min_free_gb must be 0 or more, not {cfg.min_free_gb}")
     if cfg.prom_dir is not None and not cfg.prom_dir.is_absolute():
@@ -100,6 +116,7 @@ _TYPES = {
     "schedule": str,
     "min_free_gb": (int, float),
     "prom_dir": str,
+    "post_build_hook": str,
 }
 
 
@@ -130,6 +147,7 @@ def load(path: pathlib.Path) -> Config:
             schedule=data.get("schedule", DEFAULT_SCHEDULE),
             min_free_gb=float(data.get("min_free_gb", DEFAULT_MIN_FREE_GB)),
             prom_dir=pathlib.Path(prom) if prom else None,
+            post_build_hook=data.get("post_build_hook", ""),
         )
     )
 
@@ -150,6 +168,7 @@ def render(cfg: Config) -> str:
         f"schedule = {_toml_str(cfg.schedule)}\n"
         f"min_free_gb = {float(cfg.min_free_gb)!r}\n"
         f"prom_dir = {_toml_str(str(cfg.prom_dir) if cfg.prom_dir else '')}\n"
+        f"post_build_hook = {_toml_str(cfg.post_build_hook)}\n"
     )
 
 

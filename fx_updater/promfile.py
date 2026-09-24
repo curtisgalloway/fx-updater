@@ -109,6 +109,14 @@ def samples_for(doc: dict) -> list[Sample]:
             Sample(PREFIX + "build_exit", b["build_exit"], labels),
             Sample(PREFIX + "build_regen", b["regen"] is not None, labels),
         ]
+    if "hook" in doc:
+        out.append(
+            Sample(
+                PREFIX + "hook_ok",
+                doc["hook"].get("exit") == 0,
+                help="1 iff the post-build hook exited 0 (present only with a hook)",
+            )
+        )
     if "disk_free_gb" in doc:
         out.append(
             Sample(

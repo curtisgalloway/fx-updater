@@ -20,6 +20,8 @@ Order of operations, each step able to stop the run:
    `--no-update` never checks.
 4. `jiri update`, retrying network-shaped failures only.
 5. `fx build` per build dir, with one `fx gen` if the graph is stale.
+6. The post-build hook (`--hook`), after whichever outcome the run reached,
+   still under the lock. Its failure is recorded, never the run's outcome.
 
 Every outcome is written to the status document (see fx_updater/status.py),
 and to `fx_updater.prom` when a prom dir is configured. A WIP skip exits 0: a
@@ -33,7 +35,9 @@ import argparse
 import datetime
 import getpass
 import json
+import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import time
@@ -42,6 +46,7 @@ from importlib.resources import files
 from fx_updater import __version__
 from fx_updater import build
 from fx_updater import config
+from fx_updater import contract
 from fx_updater import guard
 from fx_updater import jiri
 from fx_updater import promfile
@@ -80,6 +85,10 @@ exit status:
 """
 
 _TAIL = 4000
+
+# Long enough for a metrics script over a big .ninja_log; short enough that a
+# wedged hook cannot hold the lock (and so every consumer) for the morning.
+HOOK_TIMEOUT_SECS = 900
 
 
 # `--prom-dir ""`. pathlib.Path("") is ".", which would quietly mean "the
@@ -164,10 +173,80 @@ def _apply_config(args: argparse.Namespace, cfg: config.Config | None) -> None:
         args.build_dir = list(cfg.build_dirs)
     if args.min_free_gb is None:
         args.min_free_gb = cfg.min_free_gb if cfg else config.DEFAULT_MIN_FREE_GB
+    if args.hook is None:
+        args.hook = cfg.post_build_hook if cfg else ""
+    try:
+        # A blank hook (only whitespace) splits to nothing: it means none.
+        if not shlex.split(args.hook):
+            args.hook = ""
+    except ValueError as e:
+        raise _UsageError(f"--hook: {e}") from e
     if args.prom_dir is None and cfg:
         args.prom_dir = cfg.prom_dir
     elif args.prom_dir == _NO_DIR:
         args.prom_dir = None
+
+
+def _publish(
+    args: argparse.Namespace, status_file: pathlib.Path, payload: dict
+) -> None:
+    """Write the status document, and the .prom file when one is configured."""
+    status.write_status(status_file, payload)
+    if args.prom_dir and not promfile.write(
+        args.prom_dir, promfile.samples_for(payload)
+    ):
+        print(f"warning: could not write {args.prom_dir}", file=sys.stderr)
+
+
+def _run_hook(
+    args: argparse.Namespace,
+    ran: dict,
+    status_file: pathlib.Path,
+    fuchsia: pathlib.Path,
+) -> None:
+    """Run the post-build hook and record its result in the status document.
+
+    Called with the lock still held, so a consumer waiting on the lock also
+    waits for the hook: whatever the hook reads (the build dirs' ninja logs,
+    the tree's revisions) is exactly what this run left. Its output goes to
+    the run's log. Nothing it does changes the run's outcome or exit status.
+    """
+    payload = ran["payload"]
+    argv = shlex.split(args.hook)
+    env = dict(os.environ)
+    env.update(
+        contract.hook_env(
+            payload, status_file, ran.get("build_dirs", []), ran["run_start"]
+        )
+    )
+    result: dict = {"argv": argv, "exit": None}
+    t0 = time.monotonic()
+    with open(payload["log"], "a", encoding="utf-8") as log:
+        log.write(f"+ hook: {shlex.join(argv)}\n")
+        log.flush()
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=fuchsia,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                timeout=HOOK_TIMEOUT_SECS,
+                check=False,
+            )
+            result["exit"] = proc.returncode
+        except subprocess.TimeoutExpired:
+            result["error"] = f"timed out after {HOOK_TIMEOUT_SECS}s; killed"
+        except OSError as e:
+            result["error"] = f"could not start: {e}"
+        result["secs"] = round(time.monotonic() - t0, 1)
+        if result["exit"] != 0:
+            msg = result.get("error") or f"exited {result['exit']}"
+            log.write(f"hook failed: {msg}\n")
+            print(f"warning: hook failed: {msg}", file=sys.stderr)
+    payload["hook"] = result
+    _publish(args, status_file, payload)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -193,11 +272,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         with status.Lock(status.lock_path()):
-            return _run_locked(args, fuchsia, jiri_bin, fx, status_file, log_dir)
+            ran: dict = {}
+            rc = _run_locked(args, fuchsia, jiri_bin, fx, status_file, log_dir, ran)
+            if args.hook and "payload" in ran:
+                _run_hook(args, ran, status_file, fuchsia)
+            return rc
     except status.LockHeld as e:
         print(
-            f"lock exists ({e}); another run is in progress? "
-            "`fx-updater status` shows whether its pid is still running",
+            f"another run holds the lock ({e}); `fx-updater status` shows " "its pid",
             file=sys.stderr,
         )
         return EXIT_BUSY
@@ -210,8 +292,12 @@ def _run_locked(
     fx: pathlib.Path,
     status_file: pathlib.Path,
     log_dir: pathlib.Path,
+    ran: dict,
 ) -> int:
+    """The run itself. Fills `ran` with what the hook needs once an outcome
+    is reported: the payload, the build dirs, and the start time."""
     started = datetime.datetime.now()
+    ran["run_start"] = started.timestamp()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{started:%Y-%m-%d_%H%M%S}.log"
 
@@ -234,6 +320,7 @@ def _run_locked(
 
     def report(outcome: str, reason: str, **extra) -> None:
         payload = {
+            "schema_version": contract.SCHEMA_VERSION,
             "timestamp": started.isoformat(timespec="seconds"),
             "outcome": outcome,
             "reason": reason,
@@ -241,11 +328,8 @@ def _run_locked(
             "fuchsia_dir": str(fuchsia),
         }
         payload.update(extra)
-        status.write_status(status_file, payload)
-        if args.prom_dir and not promfile.write(
-            args.prom_dir, promfile.samples_for(payload)
-        ):
-            print(f"warning: could not write {args.prom_dir}", file=sys.stderr)
+        _publish(args, status_file, payload)
+        ran["payload"] = payload
         print(f"{outcome}: {reason}")
 
     rc = EXIT_OK
@@ -257,6 +341,12 @@ def _run_locked(
                 print("no --build-dir and no .fx-build-dir", file=sys.stderr)
                 return EXIT_SETUP
             build_dirs = [fx_build_dir.read_text().strip().removeprefix("out/")]
+            try:
+                config.check_build_dir(build_dirs[0])
+            except config.ConfigError as e:
+                print(f"{fx_build_dir}: {e}", file=sys.stderr)
+                return EXIT_SETUP
+        ran["build_dirs"] = build_dirs
 
         free_gb = guard.disk_free_gb(fuchsia)
         if free_gb < args.min_free_gb:
@@ -322,6 +412,8 @@ def _run_locked(
                         f"{attempt + 1} attempt(s)",
                         update_rc=update_rc,
                         update_secs=round(update_secs, 1),
+                        integration_pre=pre,
+                        tree_pre=tree_pre,
                     )
                     return EXIT_PARTIAL
                 log.write(
@@ -407,11 +499,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print(status.summary_line(doc, path))
         if lock:
-            state = {True: "running", False: "NOT running: stale, remove it"}
-            print(
-                f"lock: {lock['path']} held by pid {lock['pid']} "
-                f"({state.get(lock['pid_alive'], 'state unknown')})"
-            )
+            pid = lock["pid"]
+            state = "running" if pid is not None else "pid not written yet"
+            print(f"lock: {lock['path']} held by pid {pid} ({state})")
     return EXIT_OK if doc else EXIT_EMPTY
 
 
@@ -438,6 +528,8 @@ def _install_config(args: argparse.Namespace, path: pathlib.Path) -> config.Conf
         cfg.schedule = args.schedule
     if args.min_free_gb is not None:
         cfg.min_free_gb = args.min_free_gb
+    if args.hook is not None:
+        cfg.post_build_hook = args.hook
     if args.prom_dir is not None:
         # An empty --prom-dir turns .prom output back off.
         cfg.prom_dir = None if args.prom_dir == _NO_DIR else args.prom_dir.absolute()
@@ -642,6 +734,13 @@ def _add_tree_flags(parser: argparse.ArgumentParser, verb: str) -> None:
         default=None,
         help='write fx_updater.prom here after every run; "" for none '
         "(default: the config's prom_dir, else none)",
+    )
+    parser.add_argument(
+        "--hook",
+        default=None,
+        help="command to run after every outcome, under the lock, split like "
+        'a shell would; "" for none (default: the config\'s post_build_hook). '
+        "See docs/contract.md for its environment",
     )
 
 

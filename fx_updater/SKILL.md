@@ -14,9 +14,9 @@ run with nobody watching: every decision errs toward leaving the tree alone.
 ## Invocation
 
 ```bash
-fx-updater install --fuchsia-dir DIR [--build-dir NAME ...] [--schedule CAL] [--prom-dir DIR] [--dry-run]
+fx-updater install --fuchsia-dir DIR [--build-dir NAME ...] [--schedule CAL] [--prom-dir DIR] [--hook CMD] [--dry-run]
 fx-updater status [--json]
-fx-updater run [--fuchsia-dir DIR] [--build-dir NAME ...] [--no-update] [--force-update]
+fx-updater run [--fuchsia-dir DIR] [--build-dir NAME ...] [--no-update] [--force-update] [--hook CMD]
 fx-updater uninstall [--dry-run]
 fx-updater --skill       # print this document
 ```
@@ -27,6 +27,10 @@ fx-updater --skill       # print this document
   (default `*-*-* 05:30:00`). Re-running converges; lines say `write` or
   `unchanged`. `--unit-name` picks another unit name.
 - `run` takes any setting not given as a flag from the config file.
+- `--hook CMD` (config `post_build_hook`) runs a command after every
+  outcome, still under the lock, with `FX_UPDATER_*` variables describing
+  the run. Its failure is recorded in `last_run.hook` and never changes the
+  outcome or exit status. `--hook ""` turns it off for one run.
 - `uninstall` disables the timer and removes the two units. It keeps the
   config and lets a run in progress finish.
 - Both mutating commands refuse to overwrite or delete a unit file of the same
@@ -50,7 +54,7 @@ jiri's and fx's own codes are in the status document (`update_rc`,
 ## Status
 
 `fx-updater status` prints one line, `<outcome> <timestamp>: <reason>`, plus a
-`lock:` line while a lock exists. `--json` prints one document:
+`lock:` line while a run holds the lock. `--json` prints one document:
 
 ```json
 {"outcome": "ok", "empty": false, "status_file": "...", "last_run": {...}, "lock": null}
@@ -63,8 +67,13 @@ If the status file exists but cannot be read, the document is
 
 Branch on `outcome` and `empty`, not on the exit status. `last_run` is the
 full status document from `$XDG_STATE_HOME/fx-updater/status.json`, with the
-log path in `last_run.log`. `lock.pid_alive` is `false` when a killed run left
-the lock behind.
+log path in `last_run.log`. `lock` is null unless a run holds the lock right
+now.
+
+Programs that consume the tree (wait for a run, read its revisions) should
+use `fx_updater.contract` and the rules in `docs/contract.md`: the lock is
+an flock, so the lock file existing means nothing, and the document carries
+`schema_version`.
 
 ## Metrics (opt-in)
 
@@ -74,7 +83,8 @@ collector. A run refused earlier (lock held, jiri/fx or config missing)
 leaves the previous file, so alert on the age of the timestamp too:
 `fx_updater_last_run_timestamp_seconds`, `_last_run_ok`, `_last_run_skipped`,
 `_last_run_outcome{outcome}`, `_commits_pulled`,
-`_build_seconds/_build_exit/_build_regen{build_dir}`, `_disk_free_bytes`.
+`_build_seconds/_build_exit/_build_regen{build_dir}`, `_disk_free_bytes`,
+and `_hook_ok` when a hook is set.
 Without it, no `.prom` file is written anywhere.
 
 ## Notes for an agent
@@ -83,8 +93,9 @@ Without it, no `.prom` file is written anywhere.
   uncommitted; do not pass `--force-update` over someone's work.
 - Files whose only change is the mode bit (identical content) are restored
   automatically. That rewrites a permission bit and never content.
-- A stale lock (`status` says `NOT running`) blocks every later run with exit
-  20 until it is removed. Confirm no `fx-updater` process is running first.
+- Exit 20 with "another run holds the lock" means a run really is in progress: the lock is
+  an flock the kernel drops when its holder dies, so a killed run never
+  leaves one behind. Do not delete the lock file; it would not help.
 - If `install` warns that linger is off, the timer fires only while the user
   is logged in.
 - The unit runs the Python interpreter that ran `install`. After

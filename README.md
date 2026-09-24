@@ -62,13 +62,20 @@ any project with uncommitted changes. Only the permission bit is rewritten.
 ## Where results go
 
 `$XDG_STATE_HOME/fx-updater/` (default `~/.local/state/fx-updater/`):
-`status.json` holds the last outcome, `logs/` one log per run, and `lock`
-exists while a run is in progress.
+`status.json` holds the last outcome, `logs/` one log per run, and `lock` is
+flock-held while a run is in progress.
 
 `fx-updater status` prints the last outcome in one line (`--json` for the whole
 document). `--prom-dir DIR` (or `prom_dir` in the config, which `install
 --prom-dir` sets) also writes `fx_updater.prom` there for a Prometheus textfile
 collector; with neither, nothing is written.
+
+## Using the tree from another program
+
+A boot test or scheduler that builds the same tree should wait for the lock
+and read the status document through `fx_updater.contract`. A `--hook`
+command runs after every outcome, under the lock, to record whatever else you
+measure. [docs/contract.md](docs/contract.md) lists what is promised.
 
 `fx-updater --skill` prints the agent-facing usage document, including the
 exit codes. `fx-updater --help` lists them too.

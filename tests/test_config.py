@@ -52,6 +52,7 @@ def test_render_is_stable():
         'schedule = "*-*-* 05:30:00"\n'
         "min_free_gb = 100.0\n"
         'prom_dir = ""\n'
+        'post_build_hook = ""\n'
     )
 
 
@@ -74,6 +75,7 @@ def test_default_path_follows_xdg(monkeypatch, tmp_path):
         ('fuchsia_dir = "/f"\nschedule = "daily\\n[Service]"\n', "control characters"),
         ('fuchsia_dir = "/f"\nprom_dir = "/p\\u0000"\n', "control characters"),
         ('fuchsia_dir = "/f"\nbuild_dirs = ["out/x"]\n', "not a dir name"),
+        ('fuchsia_dir = "/f"\nbuild_dirs = ["a b"]\n', "not a dir name"),
         ('fuchsia_dir = "/f"\nschedule = " "\n', "schedule must not be empty"),
         ('fuchsia_dir = "rel"\n', "fuchsia_dir must be absolute"),
         ('fuchsia_dir = "/f"\nprom_dir = "rel"\n', "prom_dir must be absolute"),

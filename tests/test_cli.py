@@ -87,7 +87,8 @@ def test_clean_tree_updates_then_builds_the_default_dir(tree):
     assert [b["build_dir"] for b in doc["builds"]] == ["core.x64"]
     assert doc["builds"][0]["build_exit"] == 0
     assert pathlib.Path(doc["log"]).exists()
-    assert not status.lock_path().exists()
+    assert not status.is_held(status.lock_path())
+    assert status.lock_path().read_text() == ""
 
 
 def test_work_in_progress_skips_with_exit_zero(tree):
@@ -114,14 +115,40 @@ def test_disk_floor_touches_nothing(tree):
     assert _status()["outcome"] == "skipped_disk"
 
 
-def test_held_lock_refuses_and_leaves_it(tree):
+def test_held_lock_refuses_and_leaves_it(tree, hold_lock):
     lock = status.lock_path()
-    lock.parent.mkdir(parents=True)
-    lock.write_text("12345")
-    assert _run(tree) == cli.EXIT_BUSY
-    assert _calls(tree) == []
-    assert lock.exists()
-    assert not status.default_status_path().exists()
+    with hold_lock(lock) as holder:
+        assert _run(tree) == cli.EXIT_BUSY
+        assert _calls(tree) == []
+        assert status.lock_holder(lock)["pid"] == holder.pid
+        assert not status.default_status_path().exists()
+
+
+def test_a_killed_run_leaves_no_lock_behind(tree):
+    """The M1 backlog item: SIGKILL used to leave a lock that blocked every run."""
+    lock = status.lock_path()
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys, pathlib, time\n"
+            "from fx_updater import status\n"
+            "status.Lock(pathlib.Path(sys.argv[1])).__enter__()\n"
+            "print('held', flush=True)\n"
+            "time.sleep(60)\n",
+            str(lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout.readline() == "held\n"
+    assert status.is_held(lock)
+    holder.kill()
+    holder.wait()
+    assert lock.read_text() == str(holder.pid)  # the file stays, naming the dead run
+    assert not status.is_held(lock)
+    assert _run(tree) == 0
+    assert _status()["outcome"] == "ok"
 
 
 def test_transient_update_failure_is_retried(tree):
@@ -220,7 +247,7 @@ def test_missing_tools_exit_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     assert cli.main(["run", "--fuchsia-dir", str(tmp_path)]) == cli.EXIT_SETUP
-    assert not status.lock_path().exists()
+    assert not status.is_held(status.lock_path())
 
 
 def test_run_help_is_the_installed_entry_point():
@@ -252,7 +279,7 @@ def test_lock_is_released_when_the_pid_write_fails(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         with status.Lock(lock):
             pass
-    assert not lock.exists()
+    assert not status.is_held(lock)
 
 
 def test_status_write_ignores_a_planted_temp_symlink(tmp_path):

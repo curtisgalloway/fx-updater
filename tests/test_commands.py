@@ -111,32 +111,30 @@ def test_status_json_carries_the_last_run(capsys):
     assert doc["lock"] is None
 
 
-def test_status_reports_a_live_lock(capsys):
+def test_status_reports_a_held_lock(capsys, hold_lock):
     lock = status.lock_path()
-    lock.parent.mkdir(parents=True)
-    lock.write_text(str(os.getpid()))
-    _, out, _ = _main(capsys, "status")
-    assert out.splitlines()[1] == f"lock: {lock} held by pid {os.getpid()} (running)"
+    with hold_lock(lock) as holder:
+        _, out, _ = _main(capsys, "status")
+        assert out.splitlines()[1] == f"lock: {lock} held by pid {holder.pid} (running)"
+        _, out, _ = _main(capsys, "status", "--json")
+        assert json.loads(out)["lock"] == {
+            "path": str(lock),
+            "pid": holder.pid,
+            "pid_alive": True,
+        }
 
 
-def test_status_reports_a_stale_lock(capsys):
+def test_status_ignores_a_lock_file_nobody_holds(capsys):
+    """What M2 called a stale lock: a file left by a dead run. It blocks nothing."""
     proc = subprocess.Popen(["true"])
     proc.wait()
     lock = status.lock_path()
     lock.parent.mkdir(parents=True)
     lock.write_text(str(proc.pid))
     _, out, _ = _main(capsys, "status", "--json")
-    assert json.loads(out)["lock"]["pid_alive"] is False
+    assert json.loads(out)["lock"] is None
     _, out, _ = _main(capsys, "status")
-    assert "NOT running: stale, remove it" in out
-
-
-def test_status_lock_with_no_pid_yet_is_unknown(capsys):
-    lock = status.lock_path()
-    lock.parent.mkdir(parents=True)
-    lock.write_text("")
-    _, out, _ = _main(capsys, "status")
-    assert "held by pid None (state unknown)" in out
+    assert "lock:" not in out
 
 
 def test_unreadable_status_exits_setup(capsys):
