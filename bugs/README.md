@@ -27,4 +27,4 @@ names, addresses, usernames, or local paths.
 
 | # | Bug | Where | Status |
 |---|---|---|---|
-| fuchsia/001 | `jiri update` fails on internal CIPD packages when any worktree is registered: other workspaces' packages skip the ACL filter, and the package cache is now always on | issues.fuchsia.dev (Tools > Jiri) | DRAFT — not ready (cause from code reading; confirm with the worktree unregistered) |
+| fuchsia/001 | `jiri update` fails on internal CIPD packages when any worktree is registered: other workspaces' packages skip the ACL filter, and the package cache is now always on | issues.fuchsia.dev (Tools > Jiri) | DRAFT — ready to file (cause confirmed 2026-10-14: removing the worktree fixes the update) |

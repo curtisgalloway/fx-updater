@@ -4,7 +4,7 @@
 Where to file: https://issues.fuchsia.dev (Fuchsia > Tools > Jiri). A fix
   would go to https://fuchsia-review.googlesource.com (project: jiri) with the
   issue number in its Bug: line.
-Status: DRAFT — not ready
+Status: DRAFT — ready to file
 Tracking: fx-updater bugs/fuchsia/001
 Fix: none written. The likely fix is the one-branch change under "Fix" below.
 Evidence: observed 2026-10-14 by fx-updater's scheduled run on a build host,
@@ -18,11 +18,14 @@ Evidence: observed 2026-10-14 by fx-updater's scheduled run on a build host,
   the unfiltered packages are never checked for access, logged in or not.
   Code reading: project/worktree_package_index.go at 749c5089cc2b, lines
   94-99; commit 9961ac1c7dc0 message.
-To file: confirm the cause. Unregister the worktree (or test in a checkout
-  that never had one), run `jiri update` while logged out of CIPD, and check
-  that it succeeds with the "skipped by cipd due to lack of access" warning.
-  Then register a worktree again and check that it fails. Record both results
-  here and change Status to ready.
+Confirmed 2026-10-14: with the worktree removed (`jiri worktree remove`) and
+  nothing else changed (same jiri 749c5089cc2b, same CIPD login, same tree),
+  the 11:53 run's `jiri update` succeeds and the build starts. The 10:29 run,
+  with the worktree registered, failed on 29 internal packages.
+To file: optional, one logged-out recheck (`cipd auth-logout`, then
+  `jiri update` with no worktree registered, expecting the "skipped by cipd
+  due to lack of access" warning) so the report covers the original
+  logged-out case too. Ready to file without it.
 Everything below this header is written for filing.
 -->
 
